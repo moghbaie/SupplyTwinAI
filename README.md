@@ -64,6 +64,7 @@ scripts/             command-line entry points (fetch_data.py, audit_data.py)
 tests/               unit tests on synthetic fixtures; tests marked `data` use the real dataset
 configs/             experiment configs; manifests/ holds the frozen split definitions
 docs/data_card.md    dataset provenance, audit findings, modelling implications
+docs/data_model.md   schema, entity relationships, constraints, derived representations
 notebooks/           Colab drivers for heavy runs (MCMC, meta-learning), from Step 5 on
 artifacts/demo/      small, versioned JSON for the web demo (the only data in git)
 web/                 Vite + React + TypeScript app (Step 11)
