@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.ipynb_checkpoints/
+
+# Raw data, model outputs and large artifacts never go in git (see plan.md)
+data/
+runs/
+artifacts/*
+!artifacts/demo/
+*.parquet
+*.nc
+
+node_modules/
+web/dist/

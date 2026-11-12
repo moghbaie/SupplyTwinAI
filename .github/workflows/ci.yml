@@ -1,0 +1,17 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]"
+      - run: .venv/bin/ruff check src tests scripts
+      - run: .venv/bin/ruff format --check src tests scripts
+      - run: .venv/bin/mypy src
+      - run: .venv/bin/pytest -m "not data" -W error

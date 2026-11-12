@@ -1,0 +1,18 @@
+# Small, laptop/CI-friendly configuration.
+seed: 20261112
+
+dataset:
+  repo_id: Dingdong-Inc/FreshRetailNet-50K
+  # Pinned Hub commit SHA (printed by scripts/fetch_data.py on first download), then frozen.
+  revision: c374e85975c82816c495acfa904cc55ab14a47d3
+  data_dir: data/raw
+
+splits:
+  fit_days: 76          # days 1-76 of official train
+  val_days: 14          # days 77-90 of official train
+  # official `eval` split (7 days) is the locked final test
+  holdout_store_frac: 0.10
+  holdout_product_frac: 0.05
+
+subset:
+  n_series: 20          # first Bayesian experiments
