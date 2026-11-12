@@ -40,3 +40,31 @@ def test_dev_subset_is_in_sample_and_pre_test():
     sub = pl.read_parquet("data/subsets/dev20.parquet")
     assert not assign_roles(sub, m)["holdout"].any()
     assert sub["dt"].max() <= m["temporal"]["val"]["end"]
+
+
+def test_real_panel_and_no_leakage():
+    """Leakage perturbation test on the real 20-series development subset."""
+    from test_no_leakage import perturb_after
+
+    from sctwin.features import (
+        daily_feature_names,
+        daily_features,
+        hourly_feature_names,
+        hourly_features,
+    )
+    from sctwin.panel import build_panel
+
+    sub = pl.read_parquet("data/subsets/dev20.parquet").drop(["role", "holdout"])
+    p = build_panel(sub)
+    assert p.shape == (20, 90)
+    for t0 in (10, 45, 88):
+        for planned in (True, False):
+            q = perturb_after(p, t0, seed=t0, planned_promo=planned)
+            for fn, names in (
+                (daily_features, daily_feature_names(planned)),
+                (hourly_features, hourly_feature_names(planned)),
+            ):
+                a = fn(p, planned_promo=planned).filter(pl.col("t_idx") <= t0)
+                b = fn(q, planned_promo=planned).filter(pl.col("t_idx") <= t0)
+                cols = list(names)
+                assert a.select(cols).to_numpy().tobytes() == b.select(cols).to_numpy().tobytes()

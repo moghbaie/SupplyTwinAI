@@ -37,7 +37,7 @@ def make_frame(
                         "city_id": s % 2,
                         "store_id": 100 + s,
                         "management_group_id": p % 2,
-                        "first_category_id": p % 3,
+                        "first_category_id": p,
                         "second_category_id": p,
                         "third_category_id": p,
                         "product_id": 500 + p,

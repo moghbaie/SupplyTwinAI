@@ -139,3 +139,12 @@ def test_transitions_detect_demand_driven_depletion():
     t = audit.check_availability_transitions(df, min_full_days=5)
     assert t["before_run_start"]["-1h"]["ratio"] > 2.0
     assert 0.7 < t["before_run_start"]["-2h"]["ratio"] < 1.3
+
+
+def test_hierarchy_strict_tree(frame):
+    assert audit.check_hierarchy(frame)["is_strict_tree"]
+    bad = frame.with_columns(
+        city_id=pl.when(pl.int_range(pl.len()) == 0).then(99).otherwise(pl.col("city_id"))
+    )
+    h = audit.check_hierarchy(bad)
+    assert not h["is_strict_tree"] and h["store_id->city_id"]["children_with_multiple_parents"] == 1

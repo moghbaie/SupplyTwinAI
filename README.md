@@ -25,7 +25,7 @@ shows precomputed research artifacts. No live model training or inference runs i
 
 | Milestone | Steps | Status |
 |---|---|---|
-| M1 Reproducible data and baselines | 0 Scaffold · 1 Ingest and audit · 2 Point-in-time features and metrics · 3 Baselines | Steps 0–1 done |
+| M1 Reproducible data and baselines | 0 Scaffold · 1 Ingest and audit · 2 Point-in-time features and metrics · 3 Baselines | Steps 0–2 done |
 | M2 Bayesian demand estimator | 4 Censoring benchmark · 5 Bayesian model ladder · 6 Particle filter and replay | Not started |
 | M3 Stateful simulator | 7 Simulator plus a Python ↔ TypeScript parity slice | Not started |
 | M4 Classical decision engine | 8 Order-up-to, newsvendor, SAA-MPC, CVaR | Not started |
@@ -59,6 +59,9 @@ src/sctwin/          library code (the notebooks and scripts only call into it)
   data.py            pinned download, checksums, schema validation, hourly expansion
   audit.py           data audit: integrity gates plus normalization and stockout evidence
   splits.py          temporal and group hold-out splits, tamper-evident manifests
+  panel.py           dense series x day x hour arrays; hourly availability classes
+  features.py        point-in-time daily and hourly features (origin = end of day t-1)
+  metrics.py         MAE/WAPE, pinball, WIS, CRPS, coverage, PIT, cluster bootstrap, Holm
   repro.py           seeding, config hashing, run manifests (environment and package versions)
 scripts/             command-line entry points (fetch_data.py, audit_data.py)
 tests/               unit tests on synthetic fixtures; tests marked `data` use the real dataset

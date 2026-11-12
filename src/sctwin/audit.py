@@ -336,6 +336,30 @@ def check_availability_transitions(df: pl.DataFrame, min_full_days: int = 10) ->
     }
 
 
+HIERARCHY_EDGES = (
+    ("store_id", "city_id"),
+    ("first_category_id", "management_group_id"),
+    ("second_category_id", "first_category_id"),
+    ("third_category_id", "second_category_id"),
+    ("product_id", "third_category_id"),
+)
+
+
+def check_hierarchy(df: pl.DataFrame) -> dict[str, Any]:
+    """Each child id must map to exactly one parent id (strict trees)."""
+    out: dict[str, Any] = {}
+    for child, parent in HIERARCHY_EDGES:
+        n_par = df.group_by(child).agg(pl.col(parent).n_unique())[parent]
+        out[f"{child}->{parent}"] = {
+            "n_children": int(n_par.len()),
+            "children_with_multiple_parents": int((n_par > 1).sum()),
+        }
+    out["is_strict_tree"] = all(
+        v["children_with_multiple_parents"] == 0 for k, v in out.items() if "->" in k
+    )
+    return out
+
+
 # --------------------------------------------------------------------------- covariates
 
 
@@ -413,6 +437,7 @@ def gate(report: dict[str, Any]) -> dict[str, bool]:
             v["hourly_nan"] == 0 and v["hourly_negative"] == 0 and v["daily_negative"] == 0
         )
         g[f"{split}.status_binary"] = set(report[split]["stockouts"]["status_values"]) <= {"0", "1"}
+    g["train.hierarchy_strict_tree"] = report["train"]["hierarchy"]["is_strict_tree"]
     c = report["cross_split"]
     g["cross.no_overlapping_keys"] = c["overlapping_keys"] == 0
     g["cross.test_strictly_after_train"] = c["series_test_not_strictly_after_train"] == 0
@@ -431,6 +456,7 @@ def run_audit(train: pl.DataFrame, test: pl.DataFrame) -> dict[str, Any]:
             "lattice": check_lattice(train),
             "availability_transitions": check_availability_transitions(train),
             "covariates": check_covariates(train),
+            "hierarchy": check_hierarchy(train),
         },
         "eval": {
             "structure": check_structure(test),

@@ -89,8 +89,8 @@ The synthetic censoring benchmark (Step 4) must reproduce this demand-dependent 
   fact. Use only lagged values or an explicitly declared forecast proxy for prediction.
 - `holiday_flag` is constant per date (34.4% of train days flagged - likely includes weekends; check).
 - `activity_flag` varies across products within a store-date (product-level promotion), rate 37.8%.
-- `discount`: 51.5% of rows < 1.0; min 0.0 and a few values > 1.0 (max 1.088, 7.6e-6 of rows)
-  - treat 0.0 and > 1.0 as anomalies to clip/flag in feature engineering.
+- `discount`: 51.5% of rows < 1.0. Anomalies: 0.36% of rows have discount <= 0 and 7.6e-6 have
+  discount > 1.0 (max 1.088). Features set these to missing and add a `discount_anomaly` flag.
 - Each store belongs to one city; each product to one category path.
 
 ## Splits (`configs/manifests/splits_v1.json`, digest-protected)
