@@ -1,212 +1,255 @@
-"""Point-in-time ("as-of") feature construction.
+"""Point-in-time features at a forecast origin T, for a configurable unit ("day" / "hour").
 
-Forecast setup: the origin is the end of day t-1; targets are day t (daily total and each hour).
-A feature row for day t may use:
+Follows CLAUDE.md Rule 2:
 
-* any observation from days < t (sales, stock flags, weather, discounts, ...)
-* "known-ahead" fields of day t: the calendar (weekday, holiday_flag) and, only when
-  ``planned_promo=True``, discount and activity_flag (assumed planned in advance; ablated).
+* every feature is computed as of the origin T (end of unit T), never as of the target time;
+* "lag k" = value of unit T - k; rolling windows cover units [T - w + 1, T] (backward only);
+* daily fields (weather, discount, activity) come from the last *complete* day at T;
+* an in-stock indicator that needs unit u + 1 is only used when u + 1 <= T;
+* target-time inputs are restricted to the calendar (steps ahead, weekday, hour, holiday).
 
-It must never use day-t sales, stock flags or weather. ``tests/test_no_leakage.py`` enforces this
-by perturbing everything not allowed and checking the features do not change.
-
-Outcome columns are prefixed ``y_`` and are never in ``*_FEATURES``.
+Rows are (series, origin T, step h) with target unit u = T + L + h, h = 1..H.
+Outcome columns start with ``y`` and are never features.
 """
 
 from __future__ import annotations
 
+import warnings
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import polars as pl
 
-from sctwin.panel import CLS_A, DAY_HOURS, HIERARCHY, WEATHER, Panel, availability_classes
-
-ID_COLUMNS = ("series_idx", "t_idx", "dt", *HIERARCHY)
-CALENDAR_FEATURES = ("dow", "holiday")
-PROMO_FEATURES = ("discount", "discount_anomaly", "activity")
-HISTORY_FEATURES = (
-    "sale_lag1",
-    "sale_lag7",
-    "sale_lag14",
-    "sale_mean7",
-    "sale_mean14",
-    "sale_mean28",
-    "sale_instock_day_mean28",
-    "frac_zero_days28",
-    "stockout_hours_mean7",
-    "stockout_day_frac7",
-    "days_since_stockout",
-    *(f"{w}_lag1" for w in WEATHER),
-)
-HOURLY_EXTRA_FEATURES = (
-    "hour",
-    "hsale_lag1",
-    "hsale_lag7",
-    "hstock_lag1",
-    "hprofile_a28",
-    "hprofile_share",
-)
-
-
-def daily_feature_names(planned_promo: bool = True) -> tuple[str, ...]:
-    return (*CALENDAR_FEATURES, *(PROMO_FEATURES if planned_promo else ()), *HISTORY_FEATURES)
-
-
-def hourly_feature_names(planned_promo: bool = True) -> tuple[str, ...]:
-    return (*daily_feature_names(planned_promo), *HOURLY_EXTRA_FEATURES)
-
+from sctwin.panel import HIERARCHY
+from sctwin.timeunit import UnitSeries, weather_names
 
 # --------------------------------------------------------------------------- primitives
 
 
-def lag(x: np.ndarray, k: int) -> np.ndarray:
-    """Value from k days earlier along axis 1 (NaN where unavailable)."""
-    out = np.full(x.shape, np.nan)
-    if k < x.shape[1]:
-        out[:, k:] = x[:, :-k]
-    return out
-
-
 def trailing_mean(x: np.ndarray, k: int, mask: np.ndarray | None = None) -> np.ndarray:
-    """Mean over days [t-k, t-1] along axis 1, optionally restricted to ``mask``.
-
-    Uses strictly earlier days only. NaN where no qualifying day exists.
-    """
+    """Mean over units [j-k, j-1] along axis 1 for each index j (strictly earlier units),
+    optionally restricted to ``mask``. NaN where no qualifying unit exists."""
     x = np.asarray(x, dtype=np.float64)
     m = np.ones(x.shape, dtype=np.float64) if mask is None else mask.astype(np.float64)
     zeros = np.zeros((x.shape[0], 1, *x.shape[2:]))
-    cs = np.concatenate([zeros, np.cumsum(x * m, axis=1)], axis=1)  # cs[:, t] = sum days < t
+    cs = np.concatenate([zeros, np.cumsum(x * m, axis=1)], axis=1)
     cn = np.concatenate([zeros, np.cumsum(m, axis=1)], axis=1)
-    n_days = x.shape[1]
-    t = np.arange(n_days)
-    lo = np.maximum(t - k, 0)
-    s = cs[:, t] - cs[:, lo]
-    n = cn[:, t] - cn[:, lo]
+    j = np.arange(x.shape[1])
+    lo = np.maximum(j - k, 0)
+    s = cs[:, j] - cs[:, lo]
+    n = cn[:, j] - cn[:, lo]
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(n > 0, s / np.maximum(n, 1), np.nan)
 
 
-def days_since(event: np.ndarray) -> np.ndarray:
-    """For each t: t - (last day < t with event). NaN if none."""
-    n_series, n_days = event.shape
-    out = np.full((n_series, n_days), np.nan)
+def units_since(event: np.ndarray) -> np.ndarray:
+    """For each j: j - (last unit < j with event). NaN if none."""
+    n_series, n_units = event.shape
+    out = np.full((n_series, n_units), np.nan)
     last = np.full(n_series, np.nan)
-    for t in range(n_days):
-        out[:, t] = t - last
-        last = np.where(event[:, t], t, last)
+    for j in range(n_units):
+        out[:, j] = j - last
+        last = np.where(event[:, j], j, last)
     return out
 
 
-# --------------------------------------------------------------------------- daily
+def _pad(x: np.ndarray) -> np.ndarray:
+    """Append one dummy unit so index N ("information up to the end of unit N-1") exists.
+    Strictly-earlier statistics never read it."""
+    return np.concatenate([x, np.zeros((x.shape[0], 1, *x.shape[2:]), dtype=x.dtype)], axis=1)
 
 
-def _daily_arrays(p: Panel, planned_promo: bool) -> dict[str, np.ndarray]:
-    a, b = DAY_HOURS
-    daily = p.sales.sum(axis=-1)
-    so_hours = p.stock[:, :, a:b].sum(axis=-1).astype(np.float64)
-    n_series, n_days = p.shape
-    dow = np.array([d.weekday() for d in p.dates], dtype=np.float64)
-
-    f: dict[str, np.ndarray] = {
-        "dow": np.broadcast_to(dow, (n_series, n_days)),
-        "holiday": np.broadcast_to(p.holiday.astype(np.float64), (n_series, n_days)),
-    }
-    if planned_promo:
-        bad = (p.discount <= 0) | (p.discount > 1)
-        f["discount"] = np.where(bad, np.nan, p.discount)
-        f["discount_anomaly"] = bad.astype(np.float64)
-        f["activity"] = p.activity.astype(np.float64)
-    f |= {
-        "sale_lag1": lag(daily, 1),
-        "sale_lag7": lag(daily, 7),
-        "sale_lag14": lag(daily, 14),
-        "sale_mean7": trailing_mean(daily, 7),
-        "sale_mean14": trailing_mean(daily, 14),
-        "sale_mean28": trailing_mean(daily, 28),
-        "sale_instock_day_mean28": trailing_mean(daily, 28, mask=so_hours == 0),
-        "frac_zero_days28": trailing_mean(daily == 0, 28),
-        "stockout_hours_mean7": trailing_mean(so_hours, 7),
-        "stockout_day_frac7": trailing_mean(so_hours > 0, 7),
-        "days_since_stockout": days_since(so_hours > 0),
-    }
-    for j, w in enumerate(WEATHER):
-        f[f"{w}_lag1"] = lag(p.weather[:, :, j], 1)
-    return f
+def nanmean_rows(v: np.ndarray) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(v, axis=1)
 
 
-def _outcomes_daily(p: Panel) -> dict[str, np.ndarray]:
-    a, b = DAY_HOURS
-    return {
-        "y_daily": p.sales.sum(axis=-1),
-        "y_stockout_hours": p.stock[:, :, a:b].sum(axis=-1).astype(np.float64),
-    }
+# --------------------------------------------------------------------------- config
 
 
-def _ids(p: Panel, s_idx: np.ndarray, t_idx: np.ndarray) -> dict[str, Any]:
-    ids: dict[str, Any] = {
-        "series_idx": s_idx.astype(np.int32),
-        "t_idx": t_idx.astype(np.int16),
-        "dt": np.asarray(p.dates)[t_idx],
-    }
-    for c in HIERARCHY:
-        ids[c] = p.keys[c].to_numpy()[s_idx]
-    return ids
+@dataclass(frozen=True)
+class FeatureConfig:
+    lags: tuple[int, ...]  # sale_lag{k} = sales of unit T - k
+    windows: tuple[int, ...]  # rolling means over the last w units
+    season: int  # main seasonal period in units
+    n_seasons: int  # seasonal history length (in periods) for seasonal statistics
+    extra_seasons: tuple[int, ...]  # additional seasonal "last value" periods
+    stockout_windows: tuple[int, ...]
+    cov_days: int = 7  # rolling window for daily covariates (in days)
+
+    @staticmethod
+    def default(unit: str) -> FeatureConfig:
+        if unit == "day":
+            return FeatureConfig(lags=(0, 1, 6, 13), windows=(7, 14, 28), season=7, n_seasons=8,
+                                 extra_seasons=(), stockout_windows=(7, 28))  # fmt: skip
+        return FeatureConfig(
+            lags=(0, 1, 2, 23, 167),
+            windows=(24, 168, 672),
+            season=24,
+            n_seasons=28,
+            extra_seasons=(168,),
+            stockout_windows=(24, 168),
+        )
 
 
-def daily_features(p: Panel, t_min: int = 1, planned_promo: bool = True) -> pl.DataFrame:
-    """One row per (series, day t >= t_min): ids, features, ``y_`` outcomes."""
-    f = _daily_arrays(p, planned_promo)
-    y = _outcomes_daily(p)
-    n_series, n_days = p.shape
-    sg, tg = np.meshgrid(np.arange(n_series), np.arange(t_min, n_days), indexing="ij")
-    s_idx, t_idx = sg.ravel(), tg.ravel()
-    cols = _ids(p, s_idx, t_idx)
-    for name in daily_feature_names(planned_promo):
-        cols[name] = f[name][s_idx, t_idx]
-    for name, arr in y.items():
-        cols[name] = arr[s_idx, t_idx]
-    return pl.DataFrame(cols)
+# --------------------------------------------------------------------------- builder
 
 
-# --------------------------------------------------------------------------- hourly
+class FeatureBuilder:
+    """Builds as-of-T feature rows from a :class:`UnitSeries`.
 
-
-def hourly_features(
-    p: Panel,
-    t_min: int = 1,
-    hours: tuple[int, int] = DAY_HOURS,
-    planned_promo: bool = True,
-) -> pl.DataFrame:
-    """One row per (series, day t >= t_min, hour in [hours)): daily features + hourly ones.
-
-    Hourly history uses days < t only (no intra-day updating; that is the particle filter's job).
+    Internal convention: ``info[name][:, j]`` uses only units < j, so at origin T the value is
+    column ``j = T + 1``.
     """
-    f = _daily_arrays(p, planned_promo)
-    cls = availability_classes(p.stock)
-    prof = trailing_mean(p.sales, 28, mask=cls == CLS_A)  # (S, T, 24)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        share = prof / np.nansum(prof, axis=-1, keepdims=True)
-    hourly = {
-        "hsale_lag1": lag(p.sales, 1),
-        "hsale_lag7": lag(p.sales, 7),
-        "hstock_lag1": lag(p.stock.astype(np.float64), 1),
-        "hprofile_a28": prof,
-        "hprofile_share": share,
-    }
-    n_series, n_days = p.shape
-    h_lo, h_hi = hours
-    sg, tg, hg = np.meshgrid(
-        np.arange(n_series), np.arange(t_min, n_days), np.arange(h_lo, h_hi), indexing="ij"
-    )
-    s_idx, t_idx, h_idx = sg.ravel(), tg.ravel(), hg.ravel()
-    cols = _ids(p, s_idx, t_idx)
-    cols["hour"] = h_idx.astype(np.int8)
-    for name in daily_feature_names(planned_promo):
-        cols[name] = f[name][s_idx, t_idx]
-    for name, arr in hourly.items():
-        cols[name] = arr[s_idx, t_idx, h_idx]
-    cols["y_sale"] = p.sales[s_idx, t_idx, h_idx]
-    cols["y_stockout"] = p.stock[s_idx, t_idx, h_idx]
-    cols["y_class"] = cls[s_idx, t_idx, h_idx]
-    return pl.DataFrame(cols)
+
+    def __init__(self, us: UnitSeries, keys: pl.DataFrame, cfg: FeatureConfig | None = None):
+        self.us = us
+        self.keys = keys
+        self.cfg = cfg or FeatureConfig.default(us.unit)
+        c = self.cfg
+        x, so = _pad(us.sales), _pad(us.stockout)
+        info: dict[str, np.ndarray] = {}
+        for w in c.windows:
+            info[f"sale_mean{w}"] = trailing_mean(x, w)
+            info[f"frac_zero{w}"] = trailing_mean(x == 0, w)
+        for w in c.stockout_windows:
+            info[f"stockout_frac{w}"] = trailing_mean(so > 0, w)
+            info[f"stockout_mean{w}"] = trailing_mean(so, w)
+        info["units_since_stockout"] = units_since(so > 0)
+        # In-stock mean: the indicator of unit u needs unit u + lookahead, so at origin T only
+        # units u <= T - lookahead qualify: shift the information index by the lookahead.
+        la = us.instock_lookahead
+        w = max(c.windows)
+        im = trailing_mean(x, w, mask=_pad(us.instock_next_known))
+        if la:
+            im = np.concatenate([np.full((im.shape[0], la), np.nan), im[:, :-la]], axis=1)
+        info[f"instock_mean{w}"] = im
+        self.info = info
+        # daily covariates, indexed by day; at origin T use the last complete day
+        bad = (us.discount <= 0) | (us.discount > 1)
+        self.discount = np.where(bad, np.nan, us.discount)
+        self.discount_bad = bad.astype(np.float64)
+        self.cov_mean = {
+            "discount_mean7d": trailing_mean(
+                _pad(np.nan_to_num(self.discount, nan=1.0)), c.cov_days
+            ),
+            "activity_mean7d": trailing_mean(_pad(us.activity), c.cov_days),
+        }
+        self.dow = np.array([d.weekday() for d in us.dates], dtype=np.float64)
+
+    # ------------------------------------------------------------------ names
+
+    @property
+    def feature_names(self) -> tuple[str, ...]:
+        c = self.cfg
+        names = ["steps_ahead", "target_dow", "target_holiday"]
+        if self.us.unit == "hour":
+            names.append("target_hour")
+        names += [f"sale_lag{k}" for k in c.lags]
+        names += [f"sale_mean{w}" for w in c.windows] + [f"frac_zero{w}" for w in c.windows]
+        names += [f"stockout_frac{w}" for w in c.stockout_windows]
+        names += [f"stockout_mean{w}" for w in c.stockout_windows]
+        names += ["units_since_stockout", f"instock_mean{max(c.windows)}"]
+        names += ["sale_seasonal_last", "sale_seasonal_instock_mean"]
+        names += [f"sale_seasonal{p}_last" for p in c.extra_seasons]
+        names += [f"{w}_lastday" for w in weather_names()]
+        names += ["discount_lastday", "discount_anomaly_lastday", "activity_lastday"]
+        names += list(self.cov_mean)
+        return tuple(names)
+
+    # ------------------------------------------------------------------ seasonal gathers
+
+    @staticmethod
+    def seasonal_index(origin: np.ndarray, target: np.ndarray, period: int, n: int) -> np.ndarray:
+        """(rows, n) unit indices of the n most recent units at the target's seasonal position
+        that are observed at the origin (index <= origin); -1 where not available."""
+        k0 = np.ceil((target - origin) / period).astype(np.int64)  # smallest k: u - kP <= T
+        idx = (target - period * k0)[:, None] - period * np.arange(n)[None, :]
+        return np.where(idx >= 0, idx, -1)
+
+    def seasonal_values(
+        self,
+        s: np.ndarray,
+        origin: np.ndarray,
+        target: np.ndarray,
+        period: int,
+        n: int,
+        instock_only: bool = False,
+    ) -> np.ndarray:
+        idx = self.seasonal_index(origin, target, period, n)
+        ok = idx >= 0
+        safe = np.maximum(idx, 0)
+        vals = np.where(ok, self.us.sales[s[:, None], safe], np.nan)
+        if instock_only:
+            known = idx + self.us.instock_lookahead <= origin[:, None]
+            good = self.us.instock_next_known[s[:, None], safe]
+            vals = np.where(ok & known & good, vals, np.nan)
+        return vals
+
+    # ------------------------------------------------------------------ rows
+
+    def rows(
+        self,
+        origins: np.ndarray | list[int],
+        lead: int,
+        horizon: int,
+        series_idx: np.ndarray | None = None,
+        max_target: int | None = None,
+    ) -> pl.DataFrame:
+        us, c = self.us, self.cfg
+        n_series, n_units = us.sales.shape
+        s_all = np.arange(n_series) if series_idx is None else np.asarray(series_idx)
+        sg, og, hg = np.meshgrid(s_all, np.asarray(origins, dtype=np.int64),
+                                 np.arange(1, horizon + 1), indexing="ij")  # fmt: skip
+        s, o, h = sg.ravel(), og.ravel(), hg.ravel()
+        u = o + lead + h
+        limit = n_units - 1 if max_target is None else min(max_target, n_units - 1)
+        keep = (o >= 0) & (u <= limit)
+        s, o, h, u = s[keep], o[keep], h[keep], u[keep]
+        j = o + 1
+        tday = us.day_of_unit[u]
+        cols: dict[str, Any] = {
+            "series_idx": s.astype(np.int32),
+            "origin_idx": o.astype(np.int32),
+            "target_idx": u.astype(np.int32),
+            "step": h.astype(np.int16),
+            "target_dt": np.asarray(us.dates, dtype="datetime64[D]")[tday],
+        }
+        for col in HIERARCHY:
+            cols[col] = self.keys[col].to_numpy()[s]
+        # target-time calendar (known in advance)
+        cols["steps_ahead"] = (lead + h).astype(np.float64)
+        cols["target_dow"] = self.dow[tday]
+        cols["target_holiday"] = us.holiday[tday]
+        if us.unit == "hour":
+            cols["target_hour"] = us.hour_of_unit[u].astype(np.float64)
+        # history up to and including unit T
+        for k in c.lags:
+            src = o - k
+            cols[f"sale_lag{k}"] = np.where(src >= 0, us.sales[s, np.maximum(src, 0)], np.nan)
+        for name, arr in self.info.items():
+            cols[name] = arr[s, j]
+        cols["sale_seasonal_last"] = self.seasonal_values(s, o, u, c.season, 1)[:, 0]
+        cols["sale_seasonal_instock_mean"] = nanmean_rows(
+            self.seasonal_values(s, o, u, c.season, c.n_seasons, instock_only=True)
+        )
+        for p in c.extra_seasons:
+            cols[f"sale_seasonal{p}_last"] = self.seasonal_values(s, o, u, p, 1)[:, 0]
+        # daily covariates from the last complete day at T
+        d = us.last_complete_day(o)
+        dd = np.maximum(d, 0)
+        has = d >= 0
+        for k, w in enumerate(weather_names()):
+            cols[f"{w}_lastday"] = np.where(has, us.weather[s, dd, k], np.nan)
+        cols["discount_lastday"] = np.where(has, self.discount[s, dd], np.nan)
+        cols["discount_anomaly_lastday"] = np.where(has, self.discount_bad[s, dd], np.nan)
+        cols["activity_lastday"] = np.where(has, us.activity[s, dd], np.nan)
+        for name, arr in self.cov_mean.items():
+            cols[name] = arr[s, d + 1]  # days <= d (d = -1 -> index 0 -> NaN)
+        # outcomes (never features)
+        cols["y"] = us.sales[s, u]
+        cols["y_stockout"] = us.stockout[s, u]
+        cols["y_day"] = tday.astype(np.int32)
+        return pl.DataFrame(cols)

@@ -1,6 +1,11 @@
-"""Leakage tests: features for day t must not change when anything not allowed at the forecast
-origin (end of day t-1) is changed. Allowed for day t: calendar, and planned promotions when
-planned_promo=True. Everything from day t onward (sales, stock flags, weather) is forbidden."""
+"""Leakage tests (CLAUDE.md Rules 1 and 2), run for both units "day" and "hour".
+
+``perturb_after`` replaces everything not available at the end of unit T: hourly sales/flags
+after T (including later hours of the same day) and the daily fields (weather, discount,
+activity) of every day not complete at T. The calendar is untouched (known in advance).
+Features at origins <= T, training sets of the fold at T, and (in test_baseline.py) model
+predictions must be unchanged.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +13,22 @@ from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from sctwin.features import (
-    daily_feature_names,
-    daily_features,
-    hourly_feature_names,
-    hourly_features,
-)
+from sctwin.backtest import BacktestSpec, check_split, make_origins
+from sctwin.features import FeatureBuilder, FeatureConfig
 from sctwin.panel import HIERARCHY, Panel
+from sctwin.timeunit import resample
+
+UNITS = ("day", "hour")
+SMALL = {
+    "day": FeatureConfig(lags=(0, 1, 6), windows=(3, 7), season=7, n_seasons=3,
+                         extra_seasons=(), stockout_windows=(3,), cov_days=3),
+    "hour": FeatureConfig(lags=(0, 1, 23), windows=(6, 24, 48), season=24, n_seasons=3,
+                          extra_seasons=(168,), stockout_windows=(6, 24), cov_days=3),
+}  # fmt: skip
 
 
 def random_panel(n_series: int, n_days: int, seed: int) -> Panel:
@@ -36,87 +47,162 @@ def random_panel(n_series: int, n_days: int, seed: int) -> Panel:
     )
 
 
-def perturb_after(p: Panel, t0: int, seed: int, planned_promo: bool) -> Panel:
-    """Change everything that must not be visible to rows t <= t0."""
+def perturb_after(p: Panel, unit: str, origin: int, seed: int = 0) -> Panel:
     rng = np.random.default_rng(seed + 1)
-    q = Panel(p.keys, p.dates, p.sales.copy(), p.stock.copy(), p.discount.copy(),
-              p.activity.copy(), p.holiday.copy(), p.weather.copy())  # fmt: skip
-    q.sales[:, t0:] = rng.gamma(2.0, 5.0, q.sales[:, t0:].shape)
-    q.stock[:, t0:] = 1 - q.stock[:, t0:]
-    q.weather[:, t0:] += 100.0
-    known_from = t0 + 1 if planned_promo else t0  # day-t0 promos are known ahead only if planned
-    q.discount[:, known_from:] = 0.5
-    q.activity[:, known_from:] = 1 - q.activity[:, known_from:]
-    q.holiday[t0 + 1 :] = 1 - q.holiday[t0 + 1 :]
-    return q
+    n_series, n_days = p.shape
+    sales, stock = p.sales.copy(), p.stock.copy()
+    first_hour = (origin + 1) * 24 if unit == "day" else origin + 1
+    last_day = origin if unit == "day" else (origin + 1) // 24 - 1  # last complete day
+    fs, fk = sales.reshape(n_series, -1), stock.reshape(n_series, -1)  # views
+    fs[:, first_hour:] = rng.gamma(2.0, 5.0, fs[:, first_hour:].shape)
+    fk[:, first_hour:] = 1 - fk[:, first_hour:]
+    weather, discount, activity = p.weather.copy(), p.discount.copy(), p.activity.copy()
+    weather[:, last_day + 1 :] += 100.0
+    discount[:, last_day + 1 :] = 0.5
+    activity[:, last_day + 1 :] = 1 - activity[:, last_day + 1 :]
+    return Panel(p.keys, p.dates, sales, stock, discount, activity, p.holiday.copy(), weather)
 
 
-def _rows(df: pl.DataFrame, t0: int, cols: tuple[str, ...]) -> np.ndarray:
-    return df.filter(pl.col("t_idx") <= t0).sort(["series_idx", "t_idx"]).select(cols).to_numpy()
+def builder(p: Panel, unit: str, cfg: FeatureConfig | None = None) -> FeatureBuilder:
+    return FeatureBuilder(resample(p, unit), p.keys, cfg or SMALL[unit])
 
 
-@settings(max_examples=40, deadline=None)
-@given(
-    n_series=st.integers(1, 4),
-    n_days=st.integers(2, 45),
-    seed=st.integers(0, 10_000),
-    t0_frac=st.floats(0, 1),
-    planned_promo=st.booleans(),
-)
-def test_daily_features_ignore_future(n_series, n_days, seed, t0_frac, planned_promo):
-    p = random_panel(n_series, n_days, seed)
-    t0 = 1 + int(t0_frac * (n_days - 2))
-    q = perturb_after(p, t0, seed, planned_promo)
-    cols = daily_feature_names(planned_promo)
-    a = _rows(daily_features(p, planned_promo=planned_promo), t0, cols)
-    b = _rows(daily_features(q, planned_promo=planned_promo), t0, cols)
-    np.testing.assert_array_equal(a, b)
+def _features(df: pl.DataFrame, fb: FeatureBuilder) -> np.ndarray:
+    return df.sort(["series_idx", "origin_idx", "step"]).select(fb.feature_names).to_numpy()
 
 
-@settings(max_examples=25, deadline=None)
-@given(
-    n_days=st.integers(2, 40),
-    seed=st.integers(0, 10_000),
-    t0_frac=st.floats(0, 1),
-    planned_promo=st.booleans(),
-)
-def test_hourly_features_ignore_future(n_days, seed, t0_frac, planned_promo):
+def _case(unit: str, n_days: int, frac: float, seed: int) -> tuple[Panel, int]:
     p = random_panel(2, n_days, seed)
-    t0 = 1 + int(t0_frac * (n_days - 2))
-    q = perturb_after(p, t0, seed, planned_promo)
-    cols = hourly_feature_names(planned_promo)
-    a = _rows(hourly_features(p, planned_promo=planned_promo), t0, cols)
-    b = _rows(hourly_features(q, planned_promo=planned_promo), t0, cols)
-    np.testing.assert_array_equal(a, b)
+    n_units = n_days * (24 if unit == "hour" else 1)
+    return p, int(frac * (n_units - 2))
 
 
-def test_perturbation_is_not_vacuous():
-    """Changing day t0-1 (visible at origin t0) must change row t0, else the test above
-    would pass trivially."""
-    p = random_panel(2, 30, 0)
-    t0 = 20
-    q = Panel(p.keys, p.dates, p.sales.copy(), p.stock.copy(), p.discount, p.activity,
-              p.holiday, p.weather.copy())  # fmt: skip
-    q.sales[:, t0 - 1] += 1.0
-    q.stock[:, t0 - 1] = 1 - q.stock[:, t0 - 1]
-    q.weather[:, t0 - 1] += 1.0
-    cols = daily_feature_names()
-    a = daily_features(p).filter(pl.col("t_idx") == t0).select(cols).to_numpy()
-    b = daily_features(q).filter(pl.col("t_idx") == t0).select(cols).to_numpy()
+# --------------------------------------------------------------------------- features
+
+
+@pytest.mark.parametrize("unit", UNITS)
+@settings(max_examples=30, deadline=None)
+@given(
+    n_days=st.integers(2, 20),
+    frac=st.floats(0, 1),
+    lead=st.integers(0, 3),
+    horizon=st.integers(1, 10),
+    seed=st.integers(0, 10_000),
+)
+def test_features_ignore_data_after_origin(unit, n_days, frac, lead, horizon, seed):
+    p, origin = _case(unit, n_days, frac, seed)
+    q = perturb_after(p, unit, origin, seed)
+    origins = np.arange(origin + 1)  # every origin <= T
+    fa, fq = builder(p, unit), builder(q, unit)
+    a = fa.rows(origins, lead, horizon)
+    b = fq.rows(origins, lead, horizon)
+    np.testing.assert_array_equal(_features(a, fa), _features(b, fq))
+
+
+@pytest.mark.parametrize("unit", UNITS)
+@settings(max_examples=30, deadline=None)
+@given(
+    n_days=st.integers(4, 20),
+    frac=st.floats(0.3, 1),
+    lead=st.integers(0, 3),
+    horizon=st.integers(1, 10),
+    window=st.sampled_from(["sliding", "expanding"]),
+    seed=st.integers(0, 10_000),
+)
+def test_training_set_ignores_data_after_origin(unit, n_days, frac, lead, horizon, window, seed):
+    """Every training feature AND training target of the fold at T is unchanged when all data
+    after T is replaced, and every training target lies at or before T."""
+    p, origin = _case(unit, n_days, frac, seed)
+    spec = BacktestSpec(unit, lead, horizon, (origin,), window=window, window_length=30)
+    q = perturb_after(p, unit, origin, seed)
+    fa, fq = builder(p, unit), builder(q, unit)
+    ta = fa.rows(spec.train_times(origin), lead, horizon)
+    tb = fq.rows(spec.train_times(origin), lead, horizon)
+    check_split(ta, fa.rows([origin], lead, horizon), origin, spec)
+    if ta.height:
+        assert int(ta["target_idx"].max()) <= origin
+    cols = [*fa.feature_names, "y", "y_stockout"]
+    key = ["series_idx", "origin_idx", "step"]
+    np.testing.assert_array_equal(ta.sort(key).select(cols).to_numpy(),
+                                  tb.sort(key).select(cols).to_numpy())  # fmt: skip
+
+
+def test_hour_instock_indicator_does_not_peek_at_next_hour():
+    """Regression: the hourly in-stock indicator of hour u uses flag u+1. Changing ONLY the
+    flag of hour T+1 must not change any feature at origin T."""
+    p = random_panel(2, 10, 5)
+    for origin in (30, 100, 191):
+        q = Panel(p.keys, p.dates, p.sales, p.stock.copy(), p.discount, p.activity, p.holiday,
+                  p.weather)  # fmt: skip
+        flat = q.stock.reshape(2, -1)
+        flat[:, origin + 1] = 1 - flat[:, origin + 1]
+        fa, fq = builder(p, "hour"), builder(q, "hour")
+        np.testing.assert_array_equal(
+            _features(fa.rows([origin], 1, 24), fa), _features(fq.rows([origin], 1, 24), fq)
+        )
+
+
+@pytest.mark.parametrize("unit", UNITS)
+def test_perturbation_is_not_vacuous(unit):
+    """Changing unit T itself (available at T) must change the features at origin T."""
+    p = random_panel(2, 20, 0)
+    origin = 15 if unit == "day" else 15 * 24 + 23  # end of day 15 in both cases
+    q = perturb_after(p, unit, origin - 1)
+    fa, fq = builder(p, unit), builder(q, unit)
+    a = fa.rows([origin], 1, 3).select(fa.feature_names).to_numpy()
+    b = fq.rows([origin], 1, 3).select(fq.feature_names).to_numpy()
     changed = {
-        c for j, c in enumerate(cols) if not np.array_equal(a[:, j], b[:, j], equal_nan=True)
-    }
-    assert {"sale_lag1", "sale_mean7", "stockout_hours_mean7", "precpt_lag1"} <= changed
+        c for k, c in enumerate(fa.feature_names)
+        if not np.array_equal(a[:, k], b[:, k], equal_nan=True)
+    }  # fmt: skip
+    w = SMALL[unit].stockout_windows[0]
+    assert {"sale_lag0", f"stockout_mean{w}", "precpt_lastday"} <= changed
 
 
-def test_truncated_history_gives_same_features():
-    """Features for t <= t0 computed on data truncated after day t0 equal those on full data."""
-    p = random_panel(3, 40, 1)
-    t0 = 25
-    trunc = Panel(p.keys, p.dates[: t0 + 1], p.sales[:, : t0 + 1], p.stock[:, : t0 + 1],
-                  p.discount[:, : t0 + 1], p.activity[:, : t0 + 1], p.holiday[: t0 + 1],
-                  p.weather[:, : t0 + 1])  # fmt: skip
-    cols = hourly_feature_names()
-    np.testing.assert_array_equal(
-        _rows(hourly_features(p), t0, cols), _rows(hourly_features(trunc), t0, cols)
+def test_hour_origin_mid_day_uses_previous_complete_day():
+    p = random_panel(1, 5, 1)
+    fb = builder(p, "hour")
+    for origin, expect_day in ((2 * 24 + 10, 1), (2 * 24 + 23, 2), (5, -1)):
+        got = fb.rows([origin], 0, 1)["precpt_lastday"][0]
+        if expect_day < 0:
+            assert np.isnan(got)
+        else:
+            assert got == p.weather[0, expect_day, 0]
+
+
+# --------------------------------------------------------------------------- splits
+
+
+def test_train_times_full_window_rule():
+    spec = BacktestSpec("day", lead=1, horizon=7, origins=(74,), window="sliding",
+                        window_length=42, min_history=28)  # fmt: skip
+    t = spec.train_times(74)
+    assert t.max() == 74 - 1 - 7 and t.min() == max(28, 74 - 8 - 42 + 1)
+    assert BacktestSpec("day", 1, 7, (90,), window_length=10).train_times(90).tolist() == list(
+        range(73, 83)
     )
+    exp = BacktestSpec("hour", 1, 24, (500,), window="expanding", min_history=48,
+                       train_stride=6)  # fmt: skip
+    t = exp.train_times(500)
+    assert t.max() == 475 and t.min() >= 48 and (np.diff(t) == 6).all()
+
+
+def test_check_split_catches_violations():
+    p = random_panel(1, 60, 0)
+    fb = builder(p, "day")
+    spec = BacktestSpec("day", 1, 7, (40,), window="sliding", window_length=20)
+    test = fb.rows([40], 1, 7)
+    with pytest.raises(AssertionError, match="t > T - L - H"):
+        check_split(fb.rows(np.arange(20, 35), 1, 7), test, 40, spec)
+    with pytest.raises(AssertionError, match="partial window"):
+        check_split(fb.rows(np.arange(20, 33), 1, 7, max_target=38), test, 40, spec)
+    with pytest.raises(AssertionError, match="another origin"):
+        check_split(fb.rows(np.arange(20, 33), 1, 7), fb.rows([40, 41], 1, 7), 40, spec)
+    check_split(fb.rows(spec.train_times(40), 1, 7), test, 40, spec)
+
+
+def test_make_origins():
+    assert make_origins(76, 89, lead=1, horizon=7, step=7) == (74, 81)
+    hour = make_origins(76 * 24, 90 * 24 - 1, lead=1, horizon=24, step=24)
+    assert hour[0] == 76 * 24 - 2 and len(hour) == 14
+    assert make_origins(76 * 24, 90 * 24 - 1, 1, 24, 24, n_folds=3) == hour[:3]

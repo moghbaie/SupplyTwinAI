@@ -1,16 +1,9 @@
 import numpy as np
 import polars as pl
 import pytest
+from test_no_leakage import SMALL, builder, random_panel
 
-from sctwin.features import (
-    daily_feature_names,
-    daily_features,
-    days_since,
-    hourly_feature_names,
-    hourly_features,
-    lag,
-    trailing_mean,
-)
+from sctwin.features import FeatureBuilder, trailing_mean, units_since
 from sctwin.panel import (
     CLS_A,
     CLS_NIGHT,
@@ -20,40 +13,26 @@ from sctwin.panel import (
     availability_classes,
     build_panel,
 )
+from sctwin.timeunit import resample
 
 # --------------------------------------------------------------------------- primitives
-
-
-def test_lag():
-    x = np.array([[1.0, 2, 3, 4]])
-    np.testing.assert_array_equal(lag(x, 1), [[np.nan, 1, 2, 3]])
-    np.testing.assert_array_equal(lag(x, 4), [[np.nan] * 4])
 
 
 def test_trailing_mean_hand():
     x = np.array([[1.0, 2, 3, 4]])
     np.testing.assert_array_equal(trailing_mean(x, 2), [[np.nan, 1, 1.5, 2.5]])
     m = np.array([[True, False, True, True]])
-    # day 3 window = days 1,2 -> only day 2 qualifies; day 2 window = days 0,1 -> only day 0
     np.testing.assert_array_equal(trailing_mean(x, 2, mask=m), [[np.nan, 1, 1, 3]])
 
 
-def test_trailing_mean_extra_axes():
-    rng = np.random.default_rng(0)
-    x = rng.random((2, 10, 3))
-    out = trailing_mean(x, 4)
-    np.testing.assert_allclose(out[1, 7, 2], x[1, 3:7, 2].mean())
-
-
-def test_days_since():
+def test_units_since():
     e = np.array([[0, 1, 0, 0, 1, 0]], dtype=bool)
-    np.testing.assert_array_equal(days_since(e), [[np.nan, np.nan, 1, 2, 3, 1]])
+    np.testing.assert_array_equal(units_since(e), [[np.nan, np.nan, 1, 2, 3, 1]])
 
 
 def test_availability_classes_hand():
     st = np.zeros(24, dtype=np.int8)
-    st[[10, 11, 12, 15]] = 1
-    st[3] = 1
+    st[[10, 11, 12, 15, 3]] = 1
     c = availability_classes(st)
     expect = {9: CLS_P_PRE, 10: CLS_P_FIRST, 11: CLS_U, 12: CLS_U, 13: CLS_A, 14: CLS_P_PRE,
               15: CLS_P_FIRST, 16: CLS_A, 3: CLS_NIGHT, 22: CLS_NIGHT, 6: CLS_A}  # fmt: skip
@@ -61,20 +40,17 @@ def test_availability_classes_hand():
         assert c[h] == v, h
 
 
-# --------------------------------------------------------------------------- panel
+# --------------------------------------------------------------------------- panel / resample
 
 
 def test_build_panel_roundtrip(frame):
     p = build_panel(frame.sample(fraction=1.0, shuffle=True, seed=1))
-    n_series, n_days = p.shape
-    assert (n_series, n_days) == (20, 10)
-    row = frame.filter((pl.col("store_id") == 102) & (pl.col("product_id") == 503))
+    assert p.shape == (20, 10)
     i = p.keys.with_row_index().filter((pl.col("store_id") == 102) & (pl.col("product_id") == 503))[
         "index"
     ][0]
-    row = row.sort("dt")
+    row = frame.filter((pl.col("store_id") == 102) & (pl.col("product_id") == 503)).sort("dt")
     np.testing.assert_allclose(p.sales[i], np.array(row["hours_sale"].to_list()))
-    np.testing.assert_array_equal(p.discount[i], row["discount"].to_numpy())
 
 
 def test_build_panel_rejects_holes_and_duplicates(frame):
@@ -84,44 +60,69 @@ def test_build_panel_rejects_holes_and_duplicates(frame):
         build_panel(pl.concat([frame, frame.head(1)]))
 
 
+def test_resample_day_and_hour():
+    p = random_panel(2, 5, 0)
+    d, h = resample(p, "day"), resample(p, "hour")
+    np.testing.assert_allclose(d.sales, p.sales.sum(-1))
+    assert h.sales.shape == (2, 120)
+    np.testing.assert_array_equal(h.sales[1, 2 * 24 + 7], p.sales[1, 2, 7])
+    np.testing.assert_array_equal(d.stockout[0], p.stock[0, :, 6:22].sum(-1))
+    assert h.last_complete_day(np.array([22, 23, 47, 48])).tolist() == [-1, 0, 1, 1]
+    assert d.last_complete_day(np.array([0, 3])).tolist() == [0, 3]
+    with pytest.raises(ValueError):
+        resample(p, "week")
+
+
 # --------------------------------------------------------------------------- features
 
 
-def test_daily_features_shape_and_lag(frame):
-    p = build_panel(frame)
-    df = daily_features(p)
-    n_series, n_days = p.shape
-    assert df.height == n_series * (n_days - 1)
-    assert not any(c.startswith("y_") for c in daily_feature_names())
-    s = df.filter(pl.col("series_idx") == 3).sort("t_idx")
-    np.testing.assert_allclose(s["sale_lag1"].to_numpy()[1:], s["y_daily"].to_numpy()[:-1])
+@pytest.mark.parametrize("unit", ["day", "hour"])
+def test_lags_are_relative_to_origin(unit):
+    p = random_panel(1, 12, 2)
+    fb = builder(p, unit)
+    x = fb.us.sales[0]
+    origin = 200 if unit == "hour" else 6
+    r = fb.rows([origin], lead=2, horizon=3)
+    for k in fb.cfg.lags:
+        np.testing.assert_array_equal(r[f"sale_lag{k}"].to_numpy(), x[origin - k])
+    w = fb.cfg.windows[0]
+    np.testing.assert_allclose(r[f"sale_mean{w}"][0], x[origin - w + 1 : origin + 1].mean())
+    assert (r["steps_ahead"].to_numpy() == [3, 4, 5]).all()
+    assert (r["target_idx"].to_numpy() == origin + np.array([3, 4, 5])).all()
 
 
-def test_planned_promo_toggle(frame):
-    p = build_panel(frame)
-    assert "discount" not in daily_features(p, planned_promo=False).columns
-    assert "discount" in daily_features(p, planned_promo=True).columns
+def test_seasonal_last_and_instock_mean_bruteforce():
+    p = random_panel(1, 20, 3)
+    fb = builder(p, "hour")
+    origin, lead, horizon = 10 * 24 + 13, 1, 24
+    r = fb.rows([origin], lead, horizon)
+    x, ok = fb.us.sales[0], fb.us.instock_next_known[0]
+    for row in r.iter_rows(named=True):
+        u = row["target_idx"]
+        src = [u - 24 * k for k in range(1, 40) if u - 24 * k <= origin][: fb.cfg.n_seasons]
+        assert row["sale_seasonal_last"] == x[src[0]]
+        good = [x[i] for i in src if ok[i] and i + 1 <= origin]
+        exp = np.mean(good) if good else np.nan
+        np.testing.assert_allclose(row["sale_seasonal_instock_mean"], exp)
 
 
-def test_discount_anomalies_flagged(frame):
-    bad = frame.with_columns(
-        discount=pl.when(pl.int_range(pl.len()) < 30).then(0.0).otherwise(pl.col("discount"))
-    )
-    df = daily_features(build_panel(bad), t_min=0)
-    assert df["discount_anomaly"].sum() == 30
-    assert df.filter(pl.col("discount_anomaly") == 1)["discount"].is_nan().all()
+def test_no_target_time_promotions_in_features():
+    fb = builder(random_panel(1, 10, 0), "day")
+    assert not any(n in fb.feature_names for n in ("discount", "activity", "target_discount"))
+    assert all(not n.startswith("y") for n in fb.feature_names)
 
 
-def test_hourly_profile_matches_bruteforce():
-    from conftest import make_frame
+def test_discount_anomalies_flagged():
+    p = random_panel(2, 10, 0)
+    fb = builder(p, "day")
+    bad = (p.discount <= 0) | (p.discount > 1)
+    assert fb.discount_bad.sum() == bad.sum() and np.isnan(fb.discount[bad]).all()
 
-    p = build_panel(make_frame(n_stores=2, n_products=2, n_days=40, seed=4))
-    df = hourly_features(p, t_min=30)
-    cls = availability_classes(p.stock)
-    s, t, h = 1, 35, 12
-    days = [d for d in range(t - 28, t) if cls[s, d, h] == CLS_A]
-    expect = np.mean([p.sales[s, d, h] for d in days])
-    got = df.filter((pl.col("series_idx") == s) & (pl.col("t_idx") == t) & (pl.col("hour") == h))
-    np.testing.assert_allclose(got["hprofile_a28"][0], expect)
-    assert set(hourly_feature_names()) <= set(df.columns)
-    assert df["hour"].min() == 6 and df["hour"].max() == 21
+
+def test_default_configs_build():
+    p = random_panel(2, 40, 1)
+    for unit in ("day", "hour"):
+        fb = FeatureBuilder(resample(p, unit), p.keys)
+        r = fb.rows([fb.us.n_units - 30], 1, 7)
+        assert set(fb.feature_names) <= set(r.columns) and r.height == 14
+    assert SMALL["day"].season == 7

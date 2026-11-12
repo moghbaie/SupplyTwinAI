@@ -221,10 +221,21 @@ log μ = α_management_group → category_1 → category_2 → category_3 → pr
 The sparse assortment (median 10 stores per product, 50 products per store) is why pooling is
 needed. Many series have little data of their own, but their product and store relatives do.
 
-### 4.5 Information available at decision time
+### 4.5 Information available at a forecast origin T
 
-| Feature | Available at forecast origin? | Rule |
+Rules: `CLAUDE.md` (Rule 2). The unit is "day" or "hour"; origin T is the end of unit T.
+
+| Input | Usable at origin T? | Rule |
 |---|---|---|
+| hourly sales and stock flags | hours ≤ T | lag k = unit T − k; backward-only windows |
+| hourly in-stock class of hour u | only if u + 1 ≤ T | the class reads the next hour's flag |
+| daily totals | complete days ≤ T | a day is complete after hour 23 |
+| weather, `discount`, `activity_flag` | last complete day at T and earlier | daily records, available at end of day |
+| weekday, hour of day of the target | yes | deterministic calendar |
+| `holiday_flag` of the target day | yes (decided 2026-11-12) | treated as a published calendar |
+| target-time discount or promotion | **no** | availability timestamp unknown |
+
+---|---|---|
 | past sales and stock flags | yes | strictly before the forecast origin |
 | `discount`, `activity_flag` for the target day | assumed planned in advance | declared assumption; ablated |
 | `holiday_flag` | yes | calendar is known ahead |

@@ -4,14 +4,26 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]"
-      - run: .venv/bin/ruff check src tests scripts
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev,models]"
       - run: .venv/bin/ruff format --check src tests scripts
+      - run: .venv/bin/ruff check src tests scripts
       - run: .venv/bin/mypy src
+      # Synthetic tests, including the CLAUDE.md leakage tests for "day" and "hour".
+      # Real-data tests (-m data) and baseline runs need the dataset and run locally / in a notebook.
       - run: .venv/bin/pytest -m "not data" -W error

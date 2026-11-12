@@ -25,7 +25,7 @@ shows precomputed research artifacts. No live model training or inference runs i
 
 | Milestone | Steps | Status |
 |---|---|---|
-| M1 Reproducible data and baselines | 0 Scaffold · 1 Ingest and audit · 2 Point-in-time features and metrics · 3 Baselines | Steps 0–2 done |
+| M1 Reproducible data and baselines | 0 Scaffold · 1 Ingest and audit · 2 Point-in-time features and metrics · 3 Baselines | Steps 0–3 done ([results](docs/results_step3.md)) |
 | M2 Bayesian demand estimator | 4 Censoring benchmark · 5 Bayesian model ladder · 6 Particle filter and replay | Not started |
 | M3 Stateful simulator | 7 Simulator plus a Python ↔ TypeScript parity slice | Not started |
 | M4 Classical decision engine | 8 Order-up-to, newsvendor, SAA-MPC, CVaR | Not started |
@@ -33,6 +33,7 @@ shows precomputed research artifacts. No live model training or inference runs i
 | M6 Public app | 10 Final evaluation and report · 11 Export, web app, deploy | Not started |
 
 The full plan, with its tests, validation gates and evaluation design, is in [`plan.md`](plan.md).
+The project's non-negotiable backtesting and feature rules are in [`CLAUDE.md`](CLAUDE.md).
 The original brief is [`plan_Supply_Twin_AI.md`](plan_Supply_Twin_AI.md).
 
 ## Key data findings so far
@@ -60,7 +61,12 @@ src/sctwin/          library code (the notebooks and scripts only call into it)
   audit.py           data audit: integrity gates plus normalization and stockout evidence
   splits.py          temporal and group hold-out splits, tamper-evident manifests
   panel.py           dense series x day x hour arrays; hourly availability classes
-  features.py        point-in-time daily and hourly features (origin = end of day t-1)
+  timeunit.py        resampling to the backtest unit ("day" / "hour") with availability rules
+  features.py        point-in-time features as of origin T (lags, windows, seasonal, covariates)
+  backtest.py        rolling-origin folds; check_split enforces the no-leakage rules
+  baseline.py        seasonal naive, seasonal climatology, Tweedie GLM, LightGBM point/quantile
+  baseline_runner.py per-fold refit and prediction; evaluation subgroups
+  evaluation.py      metrics per model, per fold, per subgroup; paired bootstrap vs reference
   metrics.py         MAE/WAPE, pinball, WIS, CRPS, coverage, PIT, cluster bootstrap, Holm
   repro.py           seeding, config hashing, run manifests (environment and package versions)
 scripts/             command-line entry points (fetch_data.py, audit_data.py)

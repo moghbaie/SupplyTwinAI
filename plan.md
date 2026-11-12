@@ -25,6 +25,36 @@ and policy architecture are downstream of that and are decided only after the St
 - **Validation:** last 14 days of `train`. **Fit:** first 76 days of `train`.
 - **Group hold-out:** disjoint stores (~10%) and products (~5%) removed from all fitting.
 
+## Backtesting protocol (CLAUDE.md Rules 1 and 2, adopted 2026-11-12)
+
+All forecasting evaluation uses rolling-origin backtesting in a configurable unit ("day" or
+"hour"). Lead L, horizon H, origin step S and window W are in that unit (`configs/baselines.yaml`).
+
+- **Origin T** = end of unit T. Features are computed as of T only. "Lag k" = unit T − k.
+  Daily fields (weather, discount, activity) are used only from the last complete day at T.
+  Target-time inputs are restricted to the calendar (steps ahead, weekday, hour, holiday flag).
+  Target-time promotions are not features (their availability timestamp is unknown).
+- **Training at T:** examples with feature time t ≤ T − L − H, i.e. full target windows observed
+  by T. Sliding (length W) or expanding window. Scaling, imputation and models are fitted per fold.
+  No hyperparameter tuning yet; any tuning must use a nested time split inside the window.
+- **Prediction at T:** targets (T + L, T + L + H]. Metrics are reported per fold and aggregated.
+- **Chosen settings.** Day: L = 1, H = 7, S = 7, W = 42 (2 folds covering validation days 76–89).
+  Hour: L = 1, H = 24, S = 24, W = 504 with stride 6 (14 folds, origins at 22:00).
+- **Timezone.** Day boundaries are the dataset's `dt` in store-local time, assumed Asia/Shanghai.
+- **Enforcement.** `backtest.check_split` asserts the rules on every fold at run time.
+  `tests/test_no_leakage.py`, `tests/test_baseline.py` and `tests/test_real_data.py` replace all
+  data after T, for both units, and require features, training sets (features and targets) and
+  model predictions to be unchanged.
+
+The audit against these rules found these gaps in the first Step 3 draft, all now fixed:
+
+1. Only daily origins existed.
+2. Training included partial target windows (t ≤ T − L − 1 with per-row label filtering).
+3. There were no per-fold metrics.
+4. Target-day promotions were an optional feature.
+5. The hourly in-stock class would read hour T + 1 at an hourly origin.
+6. A low-volume grouping used data after the first origin.
+
 ## Milestones and steps
 
 | Milestone | Steps | Acceptance |
