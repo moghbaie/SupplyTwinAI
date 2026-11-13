@@ -59,6 +59,9 @@ def test_ladder_treatments():
     assert m0[CLS_A] == m0[CLS_P_PRE] == dm.EXACT and m0[CLS_P_FIRST] == m0[CLS_U] == dm.DROP
     assert m1[CLS_P_PRE] == m1[CLS_P_FIRST] == dm.CENSORED and m1[CLS_U] == dm.DROP
     assert (m1 == m2).all() and dm.LADDER["M2"].dynamic and not dm.LADDER["M1"].dynamic
+    m1d, m2d = dm.LADDER["M1d"].codes(), dm.LADDER["M2d"].codes()
+    assert m1d[CLS_P_PRE] == dm.CENSORED and m1d[CLS_P_FIRST] == m1d[CLS_U] == dm.DROP
+    assert (m1d == m2d).all() and dm.LADDER["M2d"].dynamic
 
 
 def test_ar1_matches_loop():

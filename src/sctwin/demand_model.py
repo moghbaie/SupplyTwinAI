@@ -82,6 +82,13 @@ LADDER = {
     "M2": ModelSpec(
         "M2", {"A": "exact", "P_pre": "censored", "P_first": "censored", "U": "drop"}, True
     ),
+    # Variants added after the Step 5 recovery run (not pre-declared): the first flagged hour
+    # carries residual sales proportional to demand, for which "D >= y" is not the likelihood
+    # and biases the level upward. Here only the depletion hour is censored.
+    "M1d": ModelSpec("M1d", {"A": "exact", "P_pre": "censored", "P_first": "drop", "U": "drop"}),
+    "M2d": ModelSpec(
+        "M2d", {"A": "exact", "P_pre": "censored", "P_first": "drop", "U": "drop"}, True
+    ),
 }
 
 
@@ -273,6 +280,7 @@ def fit(
                 chain_method=chain_method, progress_bar=progress)  # fmt: skip
     t0 = time.perf_counter()
     mcmc.run(jax.random.PRNGKey(seed), **model_args(data, spec), extra_fields=("diverging",))
+    jax.block_until_ready(mcmc.get_samples())  # JAX dispatch is asynchronous: wait for it
     runtime = time.perf_counter() - t0
     grouped = {k: np.asarray(v) for k, v in mcmc.get_samples(group_by_chain=True).items()}
     # convergence is judged on the sampled (non-centred) coordinates, not on derived quantities
