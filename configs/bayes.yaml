@@ -1,0 +1,31 @@
+# Step 5: Bayesian latent-demand model ladder.
+seed: 20261112
+data_dir: data/raw
+manifest: configs/manifests/splits_v1.json
+out_dir: runs/step5
+
+models: [M0, M1, M2]     # M3 = M2 run with --n-series 100
+n_series: 20             # seeded sample of in-sample series (100 is a superset of 20)
+fit_days: fit            # the official fit window (days 0..75); every benchmark day is later
+
+mcmc: {num_warmup: 1000, num_samples: 1000, num_chains: 4, target_accept: 0.9, max_tree_depth: 10}
+
+# Step 4 benchmark, rebuilt for these series on the validation days with the calibrated
+# injection configuration of runs/step4/8ba303c79bd4 (docs/results_step4.md).
+benchmark:
+  window: 28
+  seed_offset: 1
+  injection: {coverage: 1.15, coverage_sd: 0.6, leak_first: 0.16711784156890871,
+              leak_later: 0.07448787932732963, p_restock: 0.187, restock_mean_hours: 5.75}
+
+reconstruction: {n_draws: 400, grid: 121}
+taus: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+checks: {ppc_draws: 200, loo_draws: 1000}
+bootstrap: {n_boot: 2000, references: [hour_mean, profile]}
+
+# Parameter recovery: simulate from the model with known parameters on the real covariates and
+# calendar of the same series, inject stockouts with the Step 4 mechanism, fit the ladder.
+recovery:
+  truth: {alpha: -2.0, sigma_a: 0.8, tau_g: 0.3, sigma_u: 0.35, b_disc: 0.8, b_act: 0.3,
+          sigma_y: 0.9, k0: 0.5, k1: 1.0, rho: 0.5}
+  dynamic_truth: true

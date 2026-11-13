@@ -17,3 +17,4 @@ artifacts/*
 
 node_modules/
 web/dist/
+notebooks/SupplyTwinAI_nb/

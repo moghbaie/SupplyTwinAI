@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev,models]"
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev,models,bayes]"
       - run: .venv/bin/ruff format --check src tests scripts
       - run: .venv/bin/ruff check src tests scripts
       - run: .venv/bin/mypy src
