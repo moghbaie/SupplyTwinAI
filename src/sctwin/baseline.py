@@ -13,6 +13,7 @@ day t-1). They forecast *observed* sales; nothing here estimates latent demand.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -73,7 +74,13 @@ def fit_tweedie_glm(
     from sklearn.linear_model import TweedieRegressor
 
     m = TweedieRegressor(power=power, link="log", alpha=alpha, max_iter=max_iter)
-    m.fit(x, y)
+    with warnings.catch_warnings():
+        # scikit-learn < 1.6 passes `iprint` to SciPy's L-BFGS-B, deprecated since SciPy 1.15
+        # (seen on Colab's preinstalled versions); harmless, and not ours to fix.
+        warnings.filterwarnings(
+            "ignore", message=r".*`disp` and `iprint` options", category=DeprecationWarning
+        )
+        m.fit(x, y)
     mu = m.predict(x)
     dof = max(len(y) - x.shape[1] - 1, 1)
     phi = float(np.sum((y - mu) ** 2 / np.maximum(mu, 1e-9) ** power) / dof)

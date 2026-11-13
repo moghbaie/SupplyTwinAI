@@ -7,6 +7,7 @@ materialized only on demand via :func:`to_hourly_long`.
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,14 @@ import numpy as np
 import polars as pl
 
 from sctwin.repro import sha256_file
+
+# `empty_as_null` only exists in newer polars (and newer polars wants it explicit); older polars
+# (e.g. Colab's preinstalled one) has the same behaviour as its default.
+_EXPLODE_KW: dict[str, Any] = (
+    {"empty_as_null": True}
+    if "empty_as_null" in inspect.signature(pl.LazyFrame.explode).parameters
+    else {}
+)
 
 REPO_ID = "Dingdong-Inc/FreshRetailNet-50K"
 SPLIT_FILES = {"train": "data/train.parquet", "eval": "data/eval.parquet"}
@@ -158,7 +167,7 @@ def to_hourly_long(df: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     lf = df.lazy() if isinstance(df, pl.DataFrame) else df
     return (
         lf.with_columns(hour=pl.int_ranges(0, pl.col("hours_sale").list.len()))
-        .explode(["hours_sale", "hours_stock_status", "hour"], empty_as_null=True)
+        .explode(["hours_sale", "hours_stock_status", "hour"], **_EXPLODE_KW)
         .rename({"hours_sale": "sale", "hours_stock_status": "stockout"})
         .with_columns(pl.col("hour").cast(pl.Int8))
     )
