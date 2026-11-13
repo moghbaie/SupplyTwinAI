@@ -55,6 +55,20 @@ The audit against these rules found these gaps in the first Step 3 draft, all no
 5. The hourly in-stock class would read hour T + 1 at an hourly origin.
 6. A low-volume grouping used data after the first origin.
 
+## Censoring benchmark protocol (Step 4)
+
+- Truth is a **proxy**: real sales on fully in-stock days (hours 6-21). Stockouts are injected
+  with a demand-driven mechanism (opening stock K; depletion when cumulative sales reach K;
+  lower-bound sales in the depletion hour; calibrated residual sales in flagged hours; restocks).
+- Injection parameters are calibrated on the fit window only; the benchmark uses validation days.
+- Reconstruction is defined at the origin T = end of the censored day: methods see that day's
+  censored sales and flags plus summaries of days before it, never the truth, K or later days
+  (Rules 1-2; `tests/test_censoring.py`).
+- Primary metrics: daily-total MAE and bias on stockout days; hourly errors by availability
+  class; paired cluster bootstrap with Holm; pre-declared sensitivity scenarios. A fully
+  synthetic generator with known parameters (`simulate_latent`) is used for parameter recovery
+  in Step 5. Results: `docs/results_step4.md`.
+
 ## Milestones and steps
 
 | Milestone | Steps | Acceptance |

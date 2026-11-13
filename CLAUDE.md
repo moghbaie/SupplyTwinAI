@@ -79,4 +79,5 @@ uv pip install -e ".[dev,models]"
 .venv/Scripts/python -m pytest -m data                  # real-data tests
 .venv/Scripts/python scripts/audit_data.py              # Step 1 audit
 .venv/Scripts/python scripts/run_baselines.py --unit day|hour [--smoke]
+.venv/Scripts/python scripts/run_censoring_benchmark.py [--smoke]   # Step 4
 ```

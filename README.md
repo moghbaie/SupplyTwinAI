@@ -26,7 +26,7 @@ shows precomputed research artifacts. No live model training or inference runs i
 | Milestone | Steps | Status |
 |---|---|---|
 | M1 Reproducible data and baselines | 0 Scaffold · 1 Ingest and audit · 2 Point-in-time features and metrics · 3 Baselines | Steps 0–3 done ([results](docs/results_step3.md)) |
-| M2 Bayesian demand estimator | 4 Censoring benchmark · 5 Bayesian model ladder · 6 Particle filter and replay | Not started |
+| M2 Bayesian demand estimator | 4 Censoring benchmark · 5 Bayesian model ladder · 6 Particle filter and replay | Step 4 done ([results](docs/results_step4.md)) |
 | M3 Stateful simulator | 7 Simulator plus a Python ↔ TypeScript parity slice | Not started |
 | M4 Classical decision engine | 8 Order-up-to, newsvendor, SAA-MPC, CVaR | Not started |
 | M5 Adaptive and meta-learning | 9 Contextual selection and optimization, Reptile (time-boxed) | Not started |
@@ -66,6 +66,8 @@ src/sctwin/          library code (the notebooks and scripts only call into it)
   backtest.py        rolling-origin folds; check_split enforces the no-leakage rules
   baseline.py        seasonal naive, seasonal climatology, Tweedie GLM, LightGBM point/quantile
   baseline_runner.py per-fold refit and prediction; evaluation subgroups
+  censoring.py       Step 4 benchmark: demand-driven stockout injection, calibration,
+                     reconstruction baselines, fully synthetic latent-demand generator
   evaluation.py      metrics per model, per fold, per subgroup; paired bootstrap vs reference
   metrics.py         MAE/WAPE, pinball, WIS, CRPS, coverage, PIT, cluster bootstrap, Holm
   repro.py           seeding, config hashing, run manifests (environment and package versions)
