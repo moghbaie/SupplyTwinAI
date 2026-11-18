@@ -43,7 +43,8 @@ GROUPS: list[tuple[str, str, list[str]]] = [
       "configs/bayes.yaml", "configs/manifests/splits_v1.json"]),
     ("Scripts", "Command-line entry points; the run cells below call them.",
      ["scripts/fetch_data.py", "scripts/audit_data.py", "scripts/run_baselines.py",
-      "scripts/run_censoring_benchmark.py", "scripts/run_bayes.py", "scripts/run_sbc.py"]),
+      "scripts/run_censoring_benchmark.py", "scripts/run_bayes.py", "scripts/run_sbc.py",
+      "scripts/run_level_recovery.py"]),
     ("Tests", "Synthetic tests (no data needed) and real-data tests (`-m data`).",
      ["tests/conftest.py", "tests/test_audit.py", "tests/test_data.py", "tests/test_features.py",
       "tests/test_metrics.py", "tests/test_no_leakage.py", "tests/test_repro.py",
@@ -309,7 +310,8 @@ display(model_table(m["benchmark"]["daily"]["overall"]["models"]))"""),
 NumPyro NUTS. FAST: 4 series and short chains (a few minutes). Full: 20 series, 4 chains x
 (1000 + 1000) draws; chains run in parallel, one per CPU core (up to 4), so it takes hours on a
 2-core runtime. `--part real` and `--part recovery` split the run in two.
-M3 = M2 with `--n-series 100 --models M2`. M1d/M2d are exploratory (added after the plan)."""),
+M3 = M2 with `--n-series 100 --models M2`. M1d/M2d were added after the first run and declared
+primary on 2026-11-17 (plan.md, "Step 5 revision"); earlier results for them are exploratory."""),
     code("""
 chains = min(4, CORES)
 cfg5 = config_with("configs/bayes.yaml", {"mcmc": {"num_chains": chains}}, "bayes")
@@ -324,9 +326,46 @@ display(pd.DataFrame({k: {x: v["diagnostics"][x] for x in keys}
 print("daily totals on stockout days (proxy truth); baselines are point estimates")
 display(model_table(real["daily"]["overall"]["models"]))
 print("PSIS-LOO on in-stock hours:", real["loo_compare"])
+print("paired cluster bootstrap (clusters = series), Holm-adjusted; "
+      "mean_diff < 0 = lower loss than the reference")
+for name, c in real["comparisons"].items():
+    print(name)
+    display(pd.DataFrame({k: {"mean_diff": v["mean_diff"], "ci_low": v["ci"][0],
+                              "ci_high": v["ci"][1], "relative": v["relative"],
+                              "p_holm": v["p_holm"]}
+                          for k, v in c["comparisons"].items()}).T.round(4))
 for name, r in m["recovery"]["models"].items():
     print("recovery", name, r["mean_window_demand"])
     display(pd.DataFrame(r["scalars"]).T)"""),
+    md("""
+## Run: Step 5 revision, replicated level recovery (flagged-hour treatment)
+Pre-declared check (plan.md, "Step 5 revision"): with flagged hours dropped (M1d), the demand
+level must be within ±1% of a paired fit on the uncensored demand, with the 95% interval
+including 0. Static truth, 8 replications of oracle, M0, M1, M1d (4 chains x 500 + 500).
+Replications run in parallel, one worker per 4 cores. The second run is the declared follow-up:
+the same check with an opening stock that does not scale with the true day effect, which
+isolates that channel (oracle and M1d only). Together about 2-3 h on 12 cores.
+FAST: 2 replications, 4 series, short chains. Partial results are saved after each replication."""),
+    code("""
+chains = min(4, CORES)
+smoke = "--smoke" if FAST else ""
+follow_up = "--stock no_day_effect --models oracle,M1d"
+!python scripts/run_level_recovery.py --chains {chains} {smoke}
+!python scripts/run_level_recovery.py --chains {chains} {follow_up} {smoke}"""),
+    code("""
+for path in sorted(glob.glob("runs/level_recovery/*/results.json"), key=os.path.getmtime)[-2:]:
+    r = json.load(open(path, encoding="utf-8"))
+    s = r["summary"]
+    print(f"\\n{path}: stock = {r['settings']['stock']}, {s['n_reps']} replications, "
+          f"smoke = {r['settings']['smoke']}")
+    display(pd.DataFrame({m: {"rel_error_vs_truth": v["rel_error_vs_truth"],
+                              "coverage90": v["coverage90"],
+                              "rel_diff_vs_oracle": v.get("rel_diff_vs_oracle", {}).get("mean"),
+                              "ci95": v.get("rel_diff_vs_oracle", {}).get("ci95")}
+                          for m, v in s.items() if isinstance(v, dict) and "coverage90" in v}).T)
+    print("acceptance (M1d, declared configuration only):", s.get("acceptance_M1d"))
+    display(pd.DataFrame({(x["rep"], m): {k: v[k] for k in ("runtime_s", "divergences", "max_rhat")}
+                          for x in r["replications"] for m, v in x["models"].items()}).T)"""),
     md("""
 ## Run: Step 5, simulation-based calibration of M1
 Ranks of the true parameters among posterior draws should be uniform (chi-square p-values not

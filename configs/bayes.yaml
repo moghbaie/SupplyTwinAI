@@ -5,8 +5,9 @@ manifest: configs/manifests/splits_v1.json
 out_dir: runs/step5
 
 models: [M0, M1, M2, M1d, M2d]   # M3 = M2 run with --n-series 100
-# M1d/M2d (P_first dropped, only the depletion hour censored) were added after the recovery
-# run, not pre-declared: report them as exploratory.
+# M1d/M2d (P_first dropped, only the depletion hour censored) were added after the first
+# recovery run. Declared primary on 2026-11-17 before any rerun (plan.md, "Step 5 revision");
+# results from runs before that date are exploratory for them.
 n_series: 20             # seeded sample of in-sample series (100 is a superset of 20)
 fit_days: fit            # the official fit window (days 0..75); every benchmark day is later
 

@@ -69,6 +69,31 @@ The audit against these rules found these gaps in the first Step 3 draft, all no
   synthetic generator with known parameters (`simulate_latent`) is used for parameter recovery
   in Step 5. Results: `docs/results_step4.md`.
 
+## Step 5 revision: level bias (declared 2026-11-17, before any rerun)
+
+Declared after the first ladder run failed its targets (`docs/results_step5.md`), while the
+replicated recovery below was running and before its results were read.
+
+- **The Step 4 benchmark and its targets are unchanged and stay primary.** The first run's
+  verdicts (not met) stand and are reported as such.
+- **Flagged-hour treatment.** Only the depletion hour (P_pre) is censored; flagged hours (P_first,
+  U) are dropped. Reason (theory, not results): P(D >= y) is a valid likelihood only when the
+  bound y is not a function of D. It holds for P_pre (y = stock left before the hour) and fails
+  for flagged hours (y = leak x D under the Step 4 mechanism). Dropping is valid under both the
+  proportional-leak and the flag-noise reading of flagged-hour sales. The models with this
+  treatment (M1d, M2d) become the primary Step 5 models; M1 and M2 are still reported.
+- **Acceptance check for this treatment.** Replicated recovery (8 replications, static truth,
+  Step 4 injection), level of expected hours 6-21 demand compared with a paired fit on the
+  uncensored demand: M1d passes if the mean relative difference is within ±1% and its 95% interval
+  includes 0. If it fails, the dependence of the stock level on the day effect is investigated
+  before any rerun.
+- **Benchmark-validity diagnostics (reported, not targets):**
+  1. Leak distribution: real flagged-hour sales are mostly zero but full-size when positive; the
+     injection scales every flagged hour.
+  2. Selection of the proxy truth: fully in-stock days have lower demand than stockout days, so a
+     correct method is expected to over-predict against the proxy. Size is estimated in a
+     replica on the Step 4 Tweedie generator (not the Step 5 model family).
+
 ## Milestones and steps
 
 | Milestone | Steps | Acceptance |
